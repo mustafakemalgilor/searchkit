@@ -4,6 +4,7 @@ import re
 import tempfile
 import shutil
 import subprocess
+import abc
 
 from collections import OrderedDict
 
@@ -14,6 +15,7 @@ from searchkit import (
     FileSearcher,
     ResultFieldInfo,
     SearchDef,
+    HyperscanSearchDef,
     SequenceSearchDef,
 )
 from searchkit.search import (
@@ -119,7 +121,12 @@ class TimestampSimple(TimestampMatcherBase):
                 r'(?P<hours>\d{2}):(?P<minutes>\d{2}):(?P<seconds>\d+)']
 
 
-class TestSearchKitBase(utils.BaseTestCase):
+class TestSearchKitBase(abc.ABC, utils.BaseTestCase):
+
+    @abc.abstractmethod
+    def make_searchdef(self, *args, **kwargs):
+        raise NotImplementedError(
+            "Deriving class must implement `make_searchdef` method!")
 
     @property
     def datetime_expr(self):
@@ -146,9 +153,12 @@ class TestSearchKitBase(utils.BaseTestCase):
 
 class TestSearchKit(TestSearchKitBase):
 
+    def make_searchdef(self, *args, **kwargs):
+        return SearchDef(*args, **kwargs)
+
     def test_resultscollection(self):
         catalog = SearchCatalog()
-        sd = SearchDef(r'.+ (\S+) \S+$')
+        sd = self.make_searchdef(r'.+ (\S+) \S+$')
         catalog.register(sd, 'a/path')
         rs = ResultStoreSimple()
         results = SearchResultsCollection(catalog, rs)
@@ -170,7 +180,8 @@ class TestSearchKit(TestSearchKitBase):
                     fd.write("a key: some value\n")
                     fd.write("a key: another value\n")
 
-                    f.add(SearchDef(r'.+:\s+(\S+) \S+', tag='simple'), fpath)
+                    f.add(self.make_searchdef(
+                        r'.+:\s+(\S+) \S+', tag='simple'), fpath)
 
             results = f.run()
 
@@ -204,7 +215,8 @@ class TestSearchKit(TestSearchKitBase):
             for i in range(30):
                 open(os.path.join(dtmp, str(i)), 'w').close()
 
-            f.add(SearchDef(r'.+:\s+(\S+) \S+', tag='simple'), dtmp + '/*')
+            f.add(self.make_searchdef(
+                r'.+:\s+(\S+) \S+', tag='simple'), dtmp + '/*')
             results = f.run()
 
         self.assertEqual(len(results), 0)
@@ -220,7 +232,8 @@ class TestSearchKit(TestSearchKitBase):
                 with open(os.path.join(dtmp, str(i)), 'w') as fd:
                     fd.write("a key: foo bar\n")
 
-            f.add(SearchDef(r'.+:\s+(\S+) \S+', tag='simple'), dtmp + '/*')
+            f.add(self.make_searchdef(
+                r'.+:\s+(\S+) \S+', tag='simple'), dtmp + '/*')
             results = f.run()
 
         self.assertEqual(len(results), 30)
@@ -234,7 +247,8 @@ class TestSearchKit(TestSearchKitBase):
                     fd.write("a key: foo bar\n")
                     fd.write("a key: bar foo\n")
 
-            f.add(SearchDef(r'.+:\s+(\S+) \S+', tag='simple'), dtmp + '/*')
+            f.add(self.make_searchdef(
+                r'.+:\s+(\S+) \S+', tag='simple'), dtmp + '/*')
             results = f.run()
 
         self.assertEqual(len(results), 2000)
@@ -249,8 +263,9 @@ class TestSearchKit(TestSearchKitBase):
                          "49613 pts/2    00:00:00 ps\n")
 
             fields = ResultFieldInfo(['PID', 'TTY', 'TIME', 'CMD'])
-            f.add(SearchDef(r'\s*(\d+)\s+(\S+)\s+([0-9:]+)\s+(\S+)',
-                            tag='simple', field_info=fields), ftmp.name)
+            f.add(self.make_searchdef(r'\s*(\d+)\s+(\S+)\s+([0-9:]+)\s+(\S+)',
+                                      tag='simple', field_info=fields),
+                  ftmp.name)
             results = f.run()
 
             self.assertEqual(len(results), 2)
@@ -274,8 +289,9 @@ class TestSearchKit(TestSearchKitBase):
             fields = ResultFieldInfo({'PID': int, 'TTY': str, 'TIME': str,
                                       'CMD': str})
             self.assertEqual(set(fields.values()), set([str, int]))
-            f.add(SearchDef(r'\s*(\d+)\s+(\S+)\s+([0-9:]+)\s+(\S+)',
-                            tag='simple', field_info=fields), ftmp.name)
+            f.add(self.make_searchdef(r'\s*(\d+)\s+(\S+)\s+([0-9:]+)\s+(\S+)',
+                                      tag='simple', field_info=fields),
+                  ftmp.name)
             results = f.run()
 
             self.assertEqual(len(results), 2)
@@ -300,8 +316,9 @@ class TestSearchKit(TestSearchKitBase):
                                                   'TIME': str,
                                                   'CMD': str}))
             self.assertEqual(set(fields.values()), set([str, int]))
-            f.add(SearchDef(r'\s*(\d+)\s+(\S+)\s+([0-9:]+)\s+(\S+)',
-                            tag='simple', field_info=fields), ftmp.name)
+            f.add(self.make_searchdef(r'\s*(\d+)\s+(\S+)\s+([0-9:]+)\s+(\S+)',
+                                      tag='simple', field_info=fields),
+                  ftmp.name)
             results = f.run()
 
             self.assertEqual(len(results), 2)
@@ -315,11 +332,11 @@ class TestSearchKit(TestSearchKitBase):
                     self.assertTrue(cmd in ['bash', 'ps'])
 
     def test_large_sequence_search(self):
-        seq = SequenceSearchDef(start=SearchDef(r'(HEADER)'),
-                                body=SearchDef(r'(\d+)'),
-                                end=SearchDef(r'(FOOTER)'),
+        seq = SequenceSearchDef(start=self.make_searchdef(r'(HEADER)'),
+                                body=self.make_searchdef(r'(\d+)'),
+                                end=self.make_searchdef(r'(FOOTER)'),
                                 tag='myseq')
-        simple = SearchDef(r'(\d+)', tag='simple')
+        simple = self.make_searchdef(r'(\d+)', tag='simple')
         f = FileSearcher()
         with tempfile.TemporaryDirectory() as dtmp:
             try:
@@ -391,7 +408,7 @@ class TestSearchKit(TestSearchKitBase):
 
             mock_init.side_effect = fake_init
             path = os.path.join(self.data_root)
-            s.add(SearchDef("."), path)
+            s.add(self.make_searchdef("."), path)
             s.run()
 
     def test_logrotatelogsort(self):
@@ -486,10 +503,10 @@ class TestSearchKit(TestSearchKitBase):
     @utils.create_files({'atestfile': SEQ_TEST_1})
     def test_sequence_searcher(self):
         s = FileSearcher()
-        sd = SequenceSearchDef(start=SearchDef(
+        sd = SequenceSearchDef(start=self.make_searchdef(
                                              r"^a\S* (start\S*) point\S*"),
-                               body=SearchDef(r"leads to"),
-                               end=SearchDef(r"^an (ending)$"),
+                               body=self.make_searchdef(r"leads to"),
+                               end=self.make_searchdef(r"^an (ending)$"),
                                tag="seq-search-test1")
         s.add(sd, path=os.path.join(self.data_root, 'atestfile'))
         results = s.run()
@@ -511,10 +528,10 @@ class TestSearchKit(TestSearchKitBase):
         NOTE: tests searches in parallel.
         """
         s = FileSearcher()
-        sd = SequenceSearchDef(start=SearchDef(
+        sd = SequenceSearchDef(start=self.make_searchdef(
                                            r"^(a\S*) (start\S*) point\S*"),
-                               body=SearchDef(r"leads to"),
-                               end=SearchDef(r"^an (ending)$"),
+                               body=self.make_searchdef(r"leads to"),
+                               end=self.make_searchdef(r"^an (ending)$"),
                                tag="seq-search-test2")
         s.add(sd, path=os.path.join(self.data_root, 'atestfile'))
         s.add(sd, path=os.path.join(self.data_root, 'atestfile2'))
@@ -537,10 +554,10 @@ class TestSearchKit(TestSearchKitBase):
         NOTE: tests searches in parallel.
         """
         s = FileSearcher()
-        sd = SequenceSearchDef(start=SearchDef(
+        sd = SequenceSearchDef(start=self.make_searchdef(
                                            r"^(a\S*) (start\S*) point\S*"),
-                               body=SearchDef(r"leads to"),
-                               end=SearchDef(r"^an (ending)$"),
+                               body=self.make_searchdef(r"leads to"),
+                               end=self.make_searchdef(r"^an (ending)$"),
                                tag="seq-search-test3")
         s.add(sd, path=os.path.join(self.data_root, 'atestfile'))
         s.add(sd, path=os.path.join(self.data_root, 'atestfile2'))
@@ -559,10 +576,10 @@ class TestSearchKit(TestSearchKitBase):
     @utils.create_files({'atestfile': SEQ_TEST_4})
     def test_sequence_searcher_incomplete_eof_match(self):
         s = FileSearcher()
-        sd = SequenceSearchDef(start=SearchDef(
+        sd = SequenceSearchDef(start=self.make_searchdef(
                                            r"^(a\S*) (start\S*) point\S*"),
-                               body=SearchDef(r"value is (\S+)"),
-                               end=SearchDef(r"^$"),
+                               body=self.make_searchdef(r"value is (\S+)"),
+                               end=self.make_searchdef(r"^$"),
                                tag="seq-search-test4")
         s.add(sd, path=os.path.join(self.data_root, 'atestfile'))
         results = s.run()
@@ -582,10 +599,10 @@ class TestSearchKit(TestSearchKitBase):
     @utils.create_files({'atestfile': SEQ_TEST_5})
     def test_sequence_searcher_multiple_sections(self):
         s = FileSearcher()
-        sd = SequenceSearchDef(start=SearchDef(
+        sd = SequenceSearchDef(start=self.make_searchdef(
                                            r"^(a\S*) (start\S*) point\S*"),
-                               body=SearchDef(r"value is (\S+)"),
-                               end=SearchDef(r"^$"),
+                               body=self.make_searchdef(r"value is (\S+)"),
+                               end=self.make_searchdef(r"^$"),
                                tag="seq-search-test5")
         s.add(sd, path=os.path.join(self.data_root, 'atestfile'))
         results = s.run()
@@ -612,8 +629,8 @@ class TestSearchKit(TestSearchKitBase):
          * file ends before start of next
         """
         s = FileSearcher()
-        sd = SequenceSearchDef(start=SearchDef(r"^section (\d+)"),
-                               body=SearchDef(r"\d_\d"),
+        sd = SequenceSearchDef(start=self.make_searchdef(r"^section (\d+)"),
+                               body=self.make_searchdef(r"\d_\d"),
                                tag="seq-search-test6")
         s.add(sd, path=os.path.join(self.data_root, 'atestfile'))
         results = s.run()
@@ -641,9 +658,9 @@ class TestSearchKit(TestSearchKitBase):
          * end def matches any start
         """
         s = FileSearcher()
-        sd = SequenceSearchDef(start=SearchDef(r"^section (2)"),
-                               body=SearchDef(r"\d_\d"),
-                               end=SearchDef(r"^section (\d+)"),
+        sd = SequenceSearchDef(start=self.make_searchdef(r"^section (2)"),
+                               body=self.make_searchdef(r"\d_\d"),
+                               end=self.make_searchdef(r"^section (\d+)"),
                                tag="seq-search-test7")
         s.add(sd, path=os.path.join(self.data_root, 'atestfile'))
         results = s.run()
@@ -667,14 +684,14 @@ class TestSearchKit(TestSearchKitBase):
          * test that single incomplete result gets removed
         """
         s = FileSearcher()
-        sdA = SequenceSearchDef(start=SearchDef(r"^sectionA (\d+)"),
-                                body=SearchDef(r"\d_\d"),
-                                end=SearchDef(
+        sdA = SequenceSearchDef(start=self.make_searchdef(r"^sectionA (\d+)"),
+                                body=self.make_searchdef(r"\d_\d"),
+                                end=self.make_searchdef(
                                             r"^section\S+ (\d+)"),
                                 tag="seqA-search-test")
-        sdB = SequenceSearchDef(start=SearchDef(r"^sectionB (\d+)"),
-                                body=SearchDef(r"\d_\d"),
-                                end=SearchDef(
+        sdB = SequenceSearchDef(start=self.make_searchdef(r"^sectionB (\d+)"),
+                                body=self.make_searchdef(r"\d_\d"),
+                                end=self.make_searchdef(
                                             r"^section\S+ (\d+)"),
                                 tag="seqB-search-test")
         fname = os.path.join(self.data_root, 'atestfile')
@@ -696,8 +713,9 @@ class TestSearchKit(TestSearchKitBase):
                                         cache_path=self.constraints_cache_path,
                                         ts_matcher_cls=TimestampSimple, days=7)
         s = FileSearcher(constraint=c)
-        sd = SearchDef(r"{}\S+ (.+)".format(self.datetime_expr), tag='mysd',
-                       constraints=[c])
+        sd = self.make_searchdef(r"{}\S+ (.+)".format(self.datetime_expr),
+                                 tag='mysd',
+                                 constraints=[c])
         fname = os.path.join(self.data_root, 'atestfile')
         s.add(sd, path=fname)
         results = s.run()
@@ -714,8 +732,9 @@ class TestSearchKit(TestSearchKitBase):
                                         cache_path=self.constraints_cache_path,
                                         ts_matcher_cls=TimestampSimple, days=7)
         s = FileSearcher(constraint=c)
-        sd = SearchDef(r"{}\S+ (.+)".format(self.datetime_expr), tag='mysd',
-                       constraints=[c])
+        sd = self.make_searchdef(r"{}\S+ (.+)".format(self.datetime_expr),
+                                 tag='mysd',
+                                 constraints=[c])
         fname = os.path.join(self.data_root, 'atestfile')
         s.add(sd, path=fname)
         results = s.run()
@@ -733,7 +752,8 @@ class TestSearchKit(TestSearchKitBase):
                                         cache_path=self.constraints_cache_path,
                                         ts_matcher_cls=TimestampSimple, days=7)
         s = FileSearcher(constraint=c)
-        sd = SearchDef(r"{}\S+ (.+)".format(self.datetime_expr), tag='mysd')
+        sd = self.make_searchdef(
+            r"{}\S+ (.+)".format(self.datetime_expr), tag='mysd')
         fname = os.path.join(self.data_root, 'atestfile')
         s.add(sd, path=fname)
         results = s.run()
@@ -750,7 +770,8 @@ class TestSearchKit(TestSearchKitBase):
                                         cache_path=self.constraints_cache_path,
                                         ts_matcher_cls=TimestampSimple, days=7)
         s = FileSearcher(constraint=c)
-        sd = SearchDef(r"{}\S+ (.+)".format(self.datetime_expr), tag='mysd')
+        sd = self.make_searchdef(
+            r"{}\S+ (.+)".format(self.datetime_expr), tag='mysd')
         fname = os.path.join(self.data_root, 'atestfile')
         s.add(sd, path=fname)
         results = s.run()
@@ -768,7 +789,8 @@ class TestSearchKit(TestSearchKitBase):
                                         cache_path=self.constraints_cache_path,
                                         ts_matcher_cls=TimestampSimple, days=7)
         s = FileSearcher(constraint=c)
-        sd = SearchDef(r"{}\S+ (.+)".format(self.datetime_expr), tag='mysd')
+        sd = self.make_searchdef(
+            r"{}\S+ (.+)".format(self.datetime_expr), tag='mysd')
         fname = os.path.join(self.data_root, 'atestfile')
         s.add(sd, path=fname)
         results = s.run()
@@ -785,7 +807,8 @@ class TestSearchKit(TestSearchKitBase):
                                         cache_path=self.constraints_cache_path,
                                         ts_matcher_cls=TimestampSimple, days=7)
         s = FileSearcher(constraint=c)
-        sd = SearchDef(r"{}\S+ (.+)".format(self.datetime_expr), tag='mysd')
+        sd = self.make_searchdef(
+            r"{}\S+ (.+)".format(self.datetime_expr), tag='mysd')
         fname = os.path.join(self.data_root, 'atestfile')
         s.add(sd, path=fname)
         results = s.run()
@@ -803,7 +826,8 @@ class TestSearchKit(TestSearchKitBase):
                                         cache_path=self.constraints_cache_path,
                                         ts_matcher_cls=TimestampSimple, days=7)
         s = FileSearcher(constraint=c)
-        sd = SearchDef(r"{}\S+ (.+)".format(self.datetime_expr), tag='mysd')
+        sd = self.make_searchdef(
+            r"{}\S+ (.+)".format(self.datetime_expr), tag='mysd')
         fname = os.path.join(self.data_root, 'atestfile')
         s.add(sd, path=fname)
         results = s.run()
@@ -838,7 +862,8 @@ class TestSearchKit(TestSearchKitBase):
                                         cache_path=self.constraints_cache_path,
                                         ts_matcher_cls=TimestampSimple, days=7)
         s = FileSearcher(constraint=c)
-        sd = SearchDef(r"{}\S+ (.+)".format(self.datetime_expr), tag='mysd')
+        sd = self.make_searchdef(
+            r"{}\S+ (.+)".format(self.datetime_expr), tag='mysd')
         fname = os.path.join(self.data_root, 'atestfile')
         s.add(sd, path=fname)
         results = s.run()
@@ -856,7 +881,7 @@ class TestSearchKit(TestSearchKitBase):
                                         cache_path=self.constraints_cache_path,
                                         ts_matcher_cls=TimestampSimple, days=7)
         s = FileSearcher(constraint=c)
-        sd = SearchDef(r"(.+)", tag='mysd')
+        sd = self.make_searchdef(r"(.+)", tag='mysd')
         fname = os.path.join(self.data_root, 'atestfile')
         s.add(sd, path=fname)
         results = s.run()
@@ -876,7 +901,7 @@ class TestSearchKit(TestSearchKitBase):
                                         cache_path=self.constraints_cache_path,
                                         ts_matcher_cls=TimestampSimple, days=7)
         s = FileSearcher(constraint=c)
-        sd = SearchDef(r"(.+)", tag='mysd')
+        sd = self.make_searchdef(r"(.+)", tag='mysd')
         fname = os.path.join(self.data_root, 'atestfile')
         s.add(sd, path=fname)
         results = s.run()
@@ -895,7 +920,8 @@ class TestSearchKit(TestSearchKitBase):
                                         hours=24,
                                         ts_matcher_cls=TimestampSimple)
         s = FileSearcher(constraint=c)
-        sd = SearchDef(r"{}\S+ (.+)".format(self.datetime_expr), tag='mysd')
+        sd = self.make_searchdef(
+            r"{}\S+ (.+)".format(self.datetime_expr), tag='mysd')
         fname = os.path.join(self.data_root, 'atestfile')
         s.add(sd, path=fname)
         results = s.run()
@@ -913,8 +939,9 @@ class TestSearchKit(TestSearchKitBase):
                                         hours=24,
                                         ts_matcher_cls=TimestampSimple)
         s = FileSearcher()
-        sd = SearchDef(r"{}\S+ (.+)".format(self.datetime_expr), tag='mysd',
-                       constraints=[c])
+        sd = self.make_searchdef(r"{}\S+ (.+)".format(self.datetime_expr),
+                                 tag='mysd',
+                                 constraints=[c])
         fname = os.path.join(self.data_root, 'atestfile')
         s.add(sd, path=fname)
         results = s.run()
@@ -932,3 +959,9 @@ class TestSearchKit(TestSearchKitBase):
         self.assertEqual(sri.get(1), 'bar')
         self.assertEqual(sri.get(2), None)
         self.assertEqual(sri.num_deduped, 1)
+
+
+# Reuse the existing tests for hyperscan as well.
+class TestSearchKitHyperscan(TestSearchKit):
+    def make_searchdef(self, *args, **kwargs):
+        return HyperscanSearchDef(*args, **kwargs)
