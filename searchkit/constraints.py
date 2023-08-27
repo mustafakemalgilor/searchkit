@@ -153,23 +153,23 @@ class BinarySeekSearchBase(ConstraintBase):
         return True
 
 
-class NoMatchingLogLineWithDate(Exception):
+class ValidLinesNotFound(Exception):
     """Raised when a log file contains proper timestamps but
     no log lines after the since date."""
 
 
-class NoDateFoundInLogs(Exception):
+class ValidFormattedDateNotFound(Exception):
     """Raised when a log file does not contain any line with
     date suitable to specified date format"""
 
 
-class DateSearchFailedAtOffset(Exception):
+class DateNotFoundInLine(Exception):
     """Raised when searcher has encountered a line with no date
     and performed forward-backward searches, but still yet, could
     not found a line with date."""
 
 
-class UncheckedAccess(Exception):
+class InvalidSearchState(Exception):
     """Raised when a variable dependent on another variable (e.g.
     the variable x only has value when y is True) is accessed without
     checking the prerequisite variable."""
@@ -181,10 +181,15 @@ class FindTokenStatus(Enum):
     FAILED = 3
 
 
-class FindTokenResult(object):
-    def __init__(self, status: FindTokenStatus, found_offset=0):
+class SearchState(object):
+    def __init__(self, status: FindTokenStatus, offset=0):
+        """
+        @param status: current status of search
+        @param offset: current position in file from which next search will be
+                       started.
+        """
         self._status = status
-        self._found_offset = found_offset
+        self._offset = offset
 
     @property
     def status(self):
@@ -193,15 +198,14 @@ class FindTokenResult(object):
     @property
     def offset(self):
         if self.status == FindTokenStatus.FAILED:
-            raise UncheckedAccess()
-        return self._found_offset
+            raise InvalidSearchState()
+
+        return self._offset
 
 
-class PeekFile():
-    """A context manager class that allows peeking the
-    file by keeping the initial read position and returning
-    to it back.
-    """
+class NonDestructiveFileRead(object):
+    """ Context manager class that saves current position at start and restores
+        once finished. """
     def __init__(self, file):
         self.file = file
         self.original_position = file.tell()
@@ -214,11 +218,10 @@ class PeekFile():
 
 
 class LogLine(object):
-    """A class that represents a line in a log file.
+    """Class representing a line in a log file.
 
-    The class only keeps the start/end offsets of the line and
-    the line itself is lazily loaded on demand (i.e. by calling
-    the `text` function).
+    Keeps the start/end offsets of the line. Line content is lazy-loaded on
+    demand by calling the `text` method.
     """
 
     def __init__(self, file, constraint, line_start_lf, line_end_lf):
@@ -242,6 +245,7 @@ class LogLine(object):
         # (being the \n)
         if self.start_lf.status == FindTokenStatus.FOUND:
             return self.start_lf.offset + 1
+
         return self.start_lf.offset
 
     @property
@@ -252,6 +256,7 @@ class LogLine(object):
         # the \n)
         if self.end_lf.status == FindTokenStatus.FOUND:
             return self.end_lf.offset - 1
+
         return self.end_lf.offset
 
     @property
@@ -271,9 +276,7 @@ class LogLine(object):
         The function will use extracted_datetime function to parse
         the date/time.
 
-        Returns:
-            datetime: if `text` contains a valid datetime
-            None: otherwise
+        @return: datetime: if `text` contains a valid datetime otherwise None.
         """
         return self._constraint.extracted_datetime(self.text)
 
@@ -285,102 +288,89 @@ class LogLine(object):
         on demand. The function will revert the file offset back after reading
         to where it was before.
 
-        Returns:
-            str: The line text
+        @return: the line text string
         """
-        with PeekFile(self._file) as f:
+        with NonDestructiveFileRead(self._file) as f:
             f.seek(self.start_offset)
             line_text = f.read(len(self))
             return line_text
 
 
-class LogFileDateSinceSeeker:
-    r"""This class allows user to perform `since` date lookups with
-    file offsets. This is useful for performing line-based binary
-    date searches on a log file.
+class LogFileDateSinceSeeker(object):
+    r"""Performs "since" date lookups with file offsets. This is
+    useful for performing line-based binary date searches on a log file.
 
-    The class implements __len__ and __getitem__ methods in order to
-    behave like a list. When __getitem__ is called with ane offset,
-    the algorithm locates the rightmost and leftmost line feed (`\n`)
-    to form a line. Assume the following file contents:
+    Implements __len__ and __getitem__ methods in order to behave like a list.
+    When __getitem__ is called with an offset the algorithm locates the
+    rightmost and leftmost line feed '\n' to form a line. For example with the
+    following file contents:
 
     13:15 AAAAAA\n13:16 BBBBBBB\n13:17 CCCCCC
 
-    ... and let's assume that the __getitem__ function is called with
-    offset `19`:
+    and assuming __getitem__ is called with offset 19 i.e.
 
     13:15 AAAAAA\n13:16 BBBBBBB\n13:17 CCCCCC
                         ^19
 
-    The algorithm first will read SEEK_HORIZON bytes forward, starting
+    The algorithm will first read SEEK_HORIZON bytes forward, starting
     from offset `19`, and then try to find the first line feed:
 
     13:15 AAAAAA\n13:16 BBBBBBB\n13:17 CCCCCC
                         ^19     ^r-lf
 
-    Consequently, the algorithm will seek SEEK_HORIZON bytes backward,
-    starting from offset `19`, read SEEK_HORIZON bytes and then try to
-    find the first line feed, scanning in reverse:
+    Then the algorithm will seek SEEK_HORIZON bytes backward, starting from
+    offset 19, read SEEK_HORIZON bytes and then try to find the first line feed
+    scanning in reverse:
 
     13:15 AAAAAA\n13:16 BBBBBBB\n13:17 CCCCCC
                 ^l-lf   ^19     ^r-lf
 
-    Then, the algoritm will extract the characters between l-lf and r-lf
+    Then, the algorithm will extract the characters between l-lf and r-lf
     to form a line. The line will be checked against the date matcher
-    to extract the date. If the date matcher yields a valid date, the
-    __getitem__ function will return that date. Otherwise, the search will
-    be extended to other nearby lines, prioritizing the lines prior to the
-    current, until either:
+    to extract the date. If the date matcher yields a valid date, __getitem__
+    will return that date. Otherwise, the search will be extended to other
+    nearby lines, prioritising the lines prior to the current, until either of
+    the following is true:
 
-        - a line with timestamp found, or
-        - MAX_*_FALLBACK_LINES has reached.
+        - a line with a timestamp is found
+        - MAX_*_FALLBACK_LINES has been reached
     """
 
-    # Amount of characters to read while searching
+    # Number of characters to read while searching
     SEEK_HORIZON = 256
 
-    # How many times we can expand the search
-    # horizon while trying to find a line feed.
-    # This means the search will read SEEK_HORIZON
-    # times MAX_SEEK_HORIZON_EXPAND bytes in total
-    # when a line feed character is not found.
+    # How many times we can expand the search horizon while trying to find a
+    # line feed. This means the search will read SEEK_HORIZON times
+    # MAX_SEEK_HORIZON_EXPAND bytes in total when a line feed character is not
+    # found.
     MAX_SEEK_HORIZON_EXPAND = 100
 
-    # How many lines should we search backwards utmost
-    # when the algorithm encounters lines with no date.
+    # Number of lines to search forwards when the algorithm encounters lines
+    # with no date.
     MAX_TRY_FIND_WITH_DATE_ATTEMPTS = 500
 
     LINE_FEED_TOKEN = b'\n'
 
-    def __init__(self, fd, c) -> None:
-        # import logging
-        # log.setLevel(logging.DEBUG)
+    def __init__(self, fd, c):
         self.file = fd
         self.constraint = c
         self.line_info = None
         self.found_any_date = False
         self.lookup_times = 0
-        with PeekFile(self.file) as f:
+        with NonDestructiveFileRead(self.file) as f:
             self.length = f.seek(0, 2)
 
-    def find_token_reverse(
-        self,
-        start_offset,
-        horizon,
-        token=LINE_FEED_TOKEN,
-        attempts=MAX_SEEK_HORIZON_EXPAND,
-    ):
+    def find_token_reverse(self, start_offset, horizon,
+                           attempts=MAX_SEEK_HORIZON_EXPAND):
         r"""Find `token` in `file` starting from `start_offset` and backing off
         `horizon`bytes on each iteration for maximum of `max_iterations` times.
 
-        Args:
-            start_offset (int): start offset of search
-            horizon (int): Amount of bytes to be processed on each step.
-            token (str, optional): Search token. Defaults to LINE_FEED_TOKEN.
-            attempts (int, optional): Maximum amount of search iterations.
-                                      Defaults to MAX_SEEK_HORIZON_EXPAND.
+        @param start_offset (int): start offset of search
+        @param horizon (int): Amount of bytes to be processed on each step.
+        @param attempts (int, optional): Maximum amount of search iterations.
+                                         Defaults to MAX_SEEK_HORIZON_EXPAND.
 
-        Returns:
+        @return:
             FindDelimiterResult(FindTokenStatus.FOUND, ...) if token is found
             FindDelimiterResult(FindTokenStatus.REACHED_EOF, ...) if token is
                 not found because the scan reached the EOF
@@ -399,49 +389,38 @@ class LogFileDateSinceSeeker:
             self.file.seek(read_offset)
             chunk = self.file.read(read_size)
             if not chunk or len(chunk) == 0:
-                # We've reached to start of the file and
-                # could not find the token.
-                return FindTokenResult(
-                    status=FindTokenStatus.REACHED_EOF,
-                    found_offset=0)
+                # We've reached the start of the file and could not find the
+                # token.
+                return SearchState(status=FindTokenStatus.REACHED_EOF,
+                                   offset=0)
 
-            chunk_offset = chunk.rfind(token)
+            chunk_offset = chunk.rfind(self.LINE_FEED_TOKEN)
 
             if chunk_offset == -1:
                 current_offset = current_offset - len(chunk)
                 attempts -= 1
                 if (start_offset + current_offset) < 0:
-                    return FindTokenResult(
-                        status=FindTokenStatus.REACHED_EOF,
-                        found_offset=0)
+                    return SearchState(status=FindTokenStatus.REACHED_EOF,
+                                       offset=0)
                 continue
 
-            return FindTokenResult(
-                status=FindTokenStatus.FOUND,
-                found_offset=read_offset + chunk_offset)
+            return SearchState(status=FindTokenStatus.FOUND,
+                               offset=read_offset + chunk_offset)
 
-        return FindTokenResult(FindTokenStatus.FAILED)
+        return SearchState(FindTokenStatus.FAILED)
 
-    def find_token(
-        self,
-        start_offset,
-        horizon,
-        token=LINE_FEED_TOKEN,
-        attempts=MAX_SEEK_HORIZON_EXPAND,
-    ):
+    def find_token(self, start_offset, horizon,
+                   attempts=MAX_SEEK_HORIZON_EXPAND):
         r"""Find `token` in `file` starting from `start_offset` and moving
         forward `horizon` bytes on each iteration for maximum of
         `max_iterations` times.
 
-        Args:
-            file (file): File descriptor, open in read mode
-            start_offset (int): start offset of search
-            horizon (int): Amount of bytes to be processed on each step.
-            token (str, optional): Search token. Defaults to LINE_FEED_TOKEN.
-            attempts (int, optional): Maximum amount of search iterations.
-                                      Defaults to MAX_SEEK_HORIZON_EXPAND.
+        @param start_offset (int): start offset of search
+        @param horizon (int): Amount of bytes to be processed on each step.
+        @param attempts (int, optional): Maximum amount of search iterations.
+                                         Defaults to MAX_SEEK_HORIZON_EXPAND.
 
-        Returns:
+        @return:
             FindDelimiterResult(FindTokenStatus.FOUND, ...) if token is found
             FindDelimiterResult(FindTokenStatus.REACHED_EOF, ...) if token is
                 not found because the scan reached the EOF
@@ -458,12 +437,10 @@ class LogFileDateSinceSeeker:
 
             if not chunk or len(chunk) == 0:
                 # Reached end of file
-                return FindTokenResult(
-                    status=FindTokenStatus.REACHED_EOF,
-                    found_offset=len(self)
-                )
+                return SearchState(status=FindTokenStatus.REACHED_EOF,
+                                   offset=len(self))
 
-            chunk_offset = chunk.find(token)
+            chunk_offset = chunk.find(self.LINE_FEED_TOKEN)
             if chunk_offset == -1:
                 # We failed to find the token in the chunk.
                 # Progress the current offset forward by
@@ -471,15 +448,16 @@ class LogFileDateSinceSeeker:
                 current_offset = current_offset + len(chunk)
                 attempts -= 1
                 continue
+
             # We've found the token in the chunk.
             # As the chunk_offset is a relative offset to the chunk
             # translate it to file offset while returning.
-            return FindTokenResult(
-                status=FindTokenStatus.FOUND,
-                found_offset=start_offset + current_offset + chunk_offset
-            )
+            return SearchState(status=FindTokenStatus.FOUND,
+                               offset=(start_offset + current_offset +
+                                       chunk_offset))
+
         # Reached max_iterations and found nothing.
-        return FindTokenResult(FindTokenStatus.FAILED)
+        return SearchState(FindTokenStatus.FAILED)
 
     def try_find_line(self, epicenter, slf_off=None, elf_off=None):
         r"""Try to find a line at `epicenter`. This function allows extracting
@@ -542,19 +520,16 @@ class LogFileDateSinceSeeker:
         The function will either return a valid LogLine object, or raise an
         exception.
 
-        Args:
-            epicenter (int): Search start offset
-            slf_off (int, optional): Starting line feed offset, if known.
-            Defaults to None.
-            elf_off (int, optional): Ending line feed offset, if known.
-            Defaults to None.
+        @param epicenter: Search start offset
+        @param slf_off: Optional starting line feed offset, if known. Defaults
+                        to None.
+        @param elf_off: Optional ending line feed offset, if known. Defaults to
+                        None.
 
-        Raises:
-            ValueError: when ending line feed offset could not be found
-            ValueError: when starting line feed offset could not be found
+        @raise ValueError: when ending line feed offset could not be found or
+                           when starting line feed offset could not be found.
 
-        Returns:
-            LogLine: Found logline
+        @return: found logline
         """
         log.debug("    > EPICENTER: %d", epicenter)
 
@@ -563,7 +538,7 @@ class LogFileDateSinceSeeker:
         #         ^epicenter    ^line end lf
         line_end_lf = self.find_token(
             epicenter, LogFileDateSinceSeeker.SEEK_HORIZON
-        ) if elf_off is None else FindTokenResult(
+        ) if elf_off is None else SearchState(
             FindTokenStatus.FOUND, elf_off)
 
         if line_end_lf.status == FindTokenStatus.FAILED:
@@ -575,7 +550,7 @@ class LogFileDateSinceSeeker:
         # line start lf  ^ ^epicenter
         line_start_lf = self.find_token_reverse(
             epicenter, LogFileDateSinceSeeker.SEEK_HORIZON
-        ) if slf_off is None else FindTokenResult(
+        ) if slf_off is None else SearchState(
             FindTokenStatus.FOUND, slf_off)
 
         if line_start_lf.status == FindTokenStatus.FAILED:
@@ -590,16 +565,12 @@ class LogFileDateSinceSeeker:
         # Ensure that end lf offset is >= start lf offset
         assert line_end_lf.offset >= line_start_lf.offset
 
-        return LogLine(
-            file=self.file,
-            constraint=self.constraint,
-            line_start_lf=line_start_lf,
-            line_end_lf=line_end_lf)
+        return LogLine(file=self.file, constraint=self.constraint,
+                       line_start_lf=line_start_lf, line_end_lf=line_end_lf)
 
-    def try_find_line_with_date(
-        self, start_offset, line_feed_offset=None,
-        forwards=True, attempts=MAX_TRY_FIND_WITH_DATE_ATTEMPTS
-    ):
+    def try_find_line_with_date(self, start_offset, line_feed_offset=None,
+                                forwards=True,
+                                attempts=MAX_TRY_FIND_WITH_DATE_ATTEMPTS):
         r"""Try to fetch a line with date, starting from `start_offset`.
 
         The algorithm will try to fetch a new line searching for a valid date
@@ -611,17 +582,14 @@ class LogFileDateSinceSeeker:
         fwd_line_feed or rwd_line_feed position depending on the value of the
         `forwards` parameter.
 
-        Args:
-            attempts (int): How many lines will be checked at most.
-            start_offset (int): Where to begin searching
-            prev_offset (int, optional): Offset of the fwd_line_feed,
-            or rwd_line_feed if known. Defaults to None.
-            forwards (bool, optional): Search forwards, or backwards.
-            Defaults to True (forwards).
+        @param start_offset: Where to begin searching
+        @param line_feed_offset: Offset of the fwd_line_feed, or rwd_line_feed
+                                 if known. Defaults to None.
+        @param forwards: Search forwards, or backwards. Defaults to True
+                         (forwards).
+        @param attempts (int): How many lines will be checked at most.
 
-        Returns:
-            LogLine: If a line with a date found
-            None: Otherwise
+        @return: line if found otherwise None.
         """
         offset = start_offset
         log_line = None
@@ -740,15 +708,10 @@ class LogFileDateSinceSeeker:
         functions, so therefore it only returns the `date` for
         the comparison.
 
-        Args:
-            offset (int): Lookup offset
-
-        Raises:
-            DateSearchFailedAtOffset: When a line with a date could not
-            be found.
-
-        Returns:
-            date: Date of the line at `offset`
+        @param offset: integer lookup offset
+        @raise DateNotFoundInLine: When a line with a date could not
+                                   be found.
+        @return: Date of the line at `offset`
         """
 
         self.lookup_times += 1
@@ -774,16 +737,12 @@ class LogFileDateSinceSeeker:
         # ... then, forwards.
         if not result or result.date is None:
             log.debug("######### FORWARDS SEARCH START #########")
-            result = self.try_find_line_with_date(
-                offset + 1,
-                offset,
-                True
-            )
+            result = self.try_find_line_with_date(offset + 1, offset, True)
 
             log.debug("######### FORWARDS SEARCH END #########")
 
         if not result or result.date is None:
-            raise DateSearchFailedAtOffset(
+            raise DateNotFoundInLine(
                 f"Date search failed at offset `{offset}`")
 
         # This is mostly for diagnostics. If we could not find
@@ -814,13 +773,14 @@ class LogFileDateSinceSeeker:
 
         try:
             bisect.bisect_left(self, self.constraint._since_date)
-        except DateSearchFailedAtOffset as exc:
+        except DateNotFoundInLine as exc:
             if not self.found_any_date:
-                raise NoDateFoundInLogs from exc
+                raise ValidFormattedDateNotFound from exc
+
             raise
 
         if not self.line_info:
-            raise NoMatchingLogLineWithDate
+            raise ValidLinesNotFound
 
         log.debug(
             "RUN END, FOUND LINE(START:%d, END:%d, CONTENT:%s)"
@@ -973,15 +933,15 @@ class SearchConstraintSearchSince(BinarySeekSearchBase):
                 self._results[fd.name] = None
             else:
                 self._results[fd.name] = result[0]
-        except NoDateFoundInLogs:
+        except ValidFormattedDateNotFound:
             log.debug("c:%s No timestamp found in file", self.id)
             fd.seek(0)
             return fd.tell()
-        except NoMatchingLogLineWithDate:
+        except ValidLinesNotFound:
             log.debug("c:%s No date after found in file", self.id)
             fd.seek(0, 2)
             return fd.tell()
-        except DateSearchFailedAtOffset as ed:
+        except DateNotFoundInLine as ed:
             log.debug("c:%s Expanded date search failed for a line: %s",
                       self.id, ed)
             fd.seek(0)

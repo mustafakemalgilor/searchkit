@@ -12,11 +12,11 @@ from searchkit.constraints import (
     TimestampMatcherBase,
     SearchConstraintSearchSince,
     FindTokenStatus,
-    FindTokenResult,
-    UncheckedAccess,
-    NoDateFoundInLogs,
-    NoMatchingLogLineWithDate,
-    PeekFile,
+    SearchState,
+    InvalidSearchState,
+    ValidFormattedDateNotFound,
+    ValidLinesNotFound,
+    NonDestructiveFileRead,
     LogLine,
     LogFileDateSinceSeeker,
 )
@@ -186,32 +186,32 @@ class TestSearchConstraints(TestSearchKitBase):
             self.assertEqual(offset, 0)
 
 
-class TestFindTokenResult(TestSearchKitBase):
+class TestSearchState(TestSearchKitBase):
 
     def test_construct_found(self):
-        uut = FindTokenResult(FindTokenStatus.FOUND, 15)
+        uut = SearchState(FindTokenStatus.FOUND, 15)
         self.assertEqual(uut.status, FindTokenStatus.FOUND)
         self.assertEqual(uut.offset, 15)
 
     def test_construct_failed(self):
-        uut = FindTokenResult(FindTokenStatus.FAILED, 15)
+        uut = SearchState(FindTokenStatus.FAILED, 15)
         self.assertEqual(uut.status, FindTokenStatus.FAILED)
 
-        with self.assertRaises(UncheckedAccess):
+        with self.assertRaises(InvalidSearchState):
             uut.offset
 
     def test_construct_reached_eof(self):
-        uut = FindTokenResult(FindTokenStatus.REACHED_EOF, 15)
+        uut = SearchState(FindTokenStatus.REACHED_EOF, 15)
         self.assertEqual(uut.status, FindTokenStatus.REACHED_EOF)
         self.assertEqual(uut.offset, 15)
 
 
-class TestPeekFile(TestSearchKitBase):
+class TestNonDestructiveFileRead(TestSearchKitBase):
 
     def test_peek(self):
         mock_file = mock.MagicMock()
         mock_file.tell.return_value = 0xBADC0DE
-        with PeekFile(mock_file):
+        with NonDestructiveFileRead(mock_file):
             pass
         mock_file.seek.assert_called_once_with(0xBADC0DE)
 
@@ -632,7 +632,7 @@ class TestLogFileDateSinceSeeker(TestSearchKitBase):
             cache_path=self.constraints_cache_path,
             ts_matcher_cls=TimestampSimple, days=7)
         uut = LogFileDateSinceSeeker(self.mock_file, self.constraint)
-        with self.assertRaises(NoMatchingLogLineWithDate):
+        with self.assertRaises(ValidLinesNotFound):
             uut.run()
 
     def test_run_no_date_found(self):
@@ -642,5 +642,5 @@ class TestLogFileDateSinceSeeker(TestSearchKitBase):
             cache_path=self.constraints_cache_path,
             ts_matcher_cls=TimestampSimple, days=7)
         uut = LogFileDateSinceSeeker(self.mock_file, self.constraint)
-        with self.assertRaises(NoDateFoundInLogs):
+        with self.assertRaises(ValidFormattedDateNotFound):
             uut.run()
