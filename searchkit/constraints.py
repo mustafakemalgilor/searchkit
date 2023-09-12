@@ -343,7 +343,7 @@ class LogFileDateSinceSeeker(object):
     # line feed. This means the search will read SEEK_HORIZON times
     # MAX_SEEK_HORIZON_EXPAND bytes in total when a line feed character is not
     # found.
-    MAX_SEEK_HORIZON_EXPAND = 100
+    MAX_SEEK_HORIZON_EXPAND = 4096
 
     # Number of lines to search forwards when the algorithm encounters lines
     # with no date.
@@ -379,7 +379,8 @@ class LogFileDateSinceSeeker(object):
         """
 
         current_offset = -horizon
-        while attempts > 0:
+        while True:
+            attempts -= 1
             read_offset = start_offset + current_offset
             read_offset = read_offset if read_offset > 0 else 0
             read_size = horizon
@@ -396,16 +397,17 @@ class LogFileDateSinceSeeker(object):
 
             chunk_offset = chunk.rfind(self.LINE_FEED_TOKEN)
 
-            if chunk_offset == -1:
-                current_offset = current_offset - len(chunk)
-                attempts -= 1
-                if (start_offset + current_offset) < 0:
-                    return SearchState(status=FindTokenStatus.REACHED_EOF,
-                                       offset=0)
-                continue
+            if chunk_offset != -1:
+                return SearchState(status=FindTokenStatus.FOUND,
+                                   offset=read_offset + chunk_offset)
 
-            return SearchState(status=FindTokenStatus.FOUND,
-                               offset=read_offset + chunk_offset)
+            if attempts <= 0:
+                break
+
+            current_offset = current_offset - len(chunk)
+            if (start_offset + current_offset) < 0:
+                return SearchState(status=FindTokenStatus.REACHED_EOF,
+                                   offset=0)
 
         return SearchState(FindTokenStatus.FAILED)
 
@@ -441,20 +443,18 @@ class LogFileDateSinceSeeker(object):
                                    offset=len(self))
 
             chunk_offset = chunk.find(self.LINE_FEED_TOKEN)
-            if chunk_offset == -1:
-                # We failed to find the token in the chunk.
-                # Progress the current offset forward by
-                # chunk's length.
-                current_offset = current_offset + len(chunk)
-                attempts -= 1
-                continue
-
-            # We've found the token in the chunk.
-            # As the chunk_offset is a relative offset to the chunk
-            # translate it to file offset while returning.
-            return SearchState(status=FindTokenStatus.FOUND,
-                               offset=(start_offset + current_offset +
-                                       chunk_offset))
+            if chunk_offset != -1:
+                # We've found the token in the chunk.
+                # As the chunk_offset is a relative offset to the chunk
+                # translate it to file offset while returning.
+                return SearchState(status=FindTokenStatus.FOUND,
+                                   offset=(start_offset + current_offset +
+                                           chunk_offset))
+            # We failed to find the token in the chunk.
+            # Progress the current offset forward by
+            # chunk's length.
+            current_offset = current_offset + len(chunk)
+            attempts -= 1
 
         # Reached max_iterations and found nothing.
         return SearchState(FindTokenStatus.FAILED)

@@ -263,6 +263,8 @@ class TestLogFileDateSinceSeeker(TestSearchKitBase):
         self.mock_constraint = mock.MagicMock()
         self.mock_constraint.extracted_datetime.return_value = datetime(
             2019, 4, 4, 14, 47, 33)
+        self.max_line_length = LogFileDateSinceSeeker.MAX_SEEK_HORIZON_EXPAND
+        self.max_line_length *= LogFileDateSinceSeeker.SEEK_HORIZON
 
     def test_construct(self):
         uut = LogFileDateSinceSeeker(
@@ -297,7 +299,7 @@ class TestLogFileDateSinceSeeker(TestSearchKitBase):
         uut = LogFileDateSinceSeeker(self.mock_file, self.mock_constraint)
         # Expectation: find_token_reverse should give up the search and
         # status should be `failed`
-        result = uut.find_token_reverse(100000, 256)
+        result = uut.find_token_reverse(self.max_line_length + 257, 256)
         self.assertEqual(result.status, FindTokenStatus.FAILED)
 
     def test_find_token(self):
@@ -389,12 +391,12 @@ class TestLogFileDateSinceSeeker(TestSearchKitBase):
                                               " feed offset at epicenter 83")
 
     def test_try_find_line_slf_failed(self):
-        self.sio = StringIO(('A' * 102399) + '\n')
+        self.sio = StringIO(('A' * ((self.max_line_length * 2) - 1)) + '\n')
         uut = LogFileDateSinceSeeker(self.mock_file, self.mock_constraint)
         with self.assertRaises(ValueError) as rexc:
-            uut.try_find_line(76800)
+            uut.try_find_line(self.max_line_length)
         self.assertEqual(str(rexc.exception), "Could not find start line feed "
-                                              "offset at epicenter 76800")
+                                              "offset at epicenter 1048576")
 
     def test_try_find_line_w_constraint(self):
         uut = LogFileDateSinceSeeker(self.mock_file, self.constraint)
