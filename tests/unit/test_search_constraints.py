@@ -5,7 +5,7 @@ import shutil
 import subprocess
 from datetime import datetime
 from unittest import mock
-from io import StringIO
+from io import BytesIO
 
 from . import utils
 from searchkit.constraints import (
@@ -52,8 +52,9 @@ blah 8
 2022-01-03 00:00:00.00 L4
 blah 9
 """
-# noqa, pylint: disable=all
-MYSQL_LOGS = r"""2019-04-04T14:47:33.199550Z mysqld_safe Logging to '/var/log/mysql/error.log'.
+
+# NOTE: a non-unicode char \xe2 has been inserted into the following logs
+MYSQL_LOGS = b"""2019-04-04T14:47:33.199550Z mysqld_safe Logging to '/var/log/mysql/error.log'.
 2019-04-04T14:47:33.243881Z mysqld_safe Starting mysqld daemon with databases from /var/lib/percona-xtradb-cluster
 2019-04-04T14:47:33.259636Z mysqld_safe Skipping wsrep-recover for f29f7843-56e6-11e9-b1f5-7e15c4ed7ddc:2 pair
 2019-04-04T14:47:33.261913Z mysqld_safe Assigning f29f7843-56e6-11e9-b1f5-7e15c4ed7ddc:2 to wsrep_start_position
@@ -100,7 +101,7 @@ partitioned {
 	}
 )
 2019-04-04T14:47:35.023099Z 0 [Note] WSREP: Save the discovered primary-component to disk
-2019-04-04T14:47:35.521301Z 0 [Note] WSREP: gcomm: connected
+2019-04-04T14:47:35.521301Z 0 [Note] WSREP: gcomm: connected \xe2
 2019-04-04T14:47:35.521465Z 0 [Note] WSREP: Shifting CLOSED -> OPEN (TO: 0)
 2019-04-04T14:47:35.521724Z 0 [Note] WSREP: New COMPONENT: primary = yes, bootstrap = no, my_idx = 1, memb_num = 2
 2019-04-04T14:47:35.521778Z 0 [Note] WSREP: STATE EXCHANGE: Waiting for state UUID.
@@ -121,7 +122,7 @@ partitioned {
 2019-04-04T14:47:35.522366Z 0 [Note] WSREP: Flow-control interval: [141, 141]
 2019-04-04T14:47:35.522376Z 0 [Note] WSREP: Trying to continue unpaused monitor
 2019-04-04T14:47:35.522386Z 0 [Note] WSREP: Shifting OPEN -> PRIMARY (TO: 2)
-2019-04-04T14:47:35.522479Z 2 [Note] WSREP: State transfer required: """ # noqa
+2019-04-04T14:47:35.522479Z 2 [Note] WSREP: State transfer required: """ # noqa, pylint: disable=all
 
 
 class TestSearchKitBase(utils.BaseTestCase):
@@ -249,13 +250,12 @@ class TestLogFileDateSinceSeeker(TestSearchKitBase):
 
     def setUp(self):
         super().setUp()
-        self.sio = StringIO(MYSQL_LOGS)
+        self.bio = BytesIO(MYSQL_LOGS)
         self.mock_file = mock.MagicMock()
-        self.mock_file.read.side_effect = lambda amount: self.sio.read(
-            amount).encode()
-        self.mock_file.seek.side_effect = lambda off, wh = 0: self.sio.seek(
+        self.mock_file.read.side_effect = lambda amount: self.bio.read(amount)
+        self.mock_file.seek.side_effect = lambda off, wh = 0: self.bio.seek(
             off, wh)
-        self.mock_file.tell.side_effect = lambda: self.sio.tell()
+        self.mock_file.tell.side_effect = lambda: self.bio.tell()
         self.constraint = SearchConstraintSearchSince(
             current_date=self.get_date('Tue Apr 04 14:40:01 UTC 2019'),
             cache_path=self.constraints_cache_path,
@@ -295,7 +295,7 @@ class TestLogFileDateSinceSeeker(TestSearchKitBase):
         self.assertEqual(result.offset, 0)
 
     def test_find_token_reverse_fail(self):
-        self.mock_file.read.side_effect = lambda n: ('A' * n).encode()
+        self.mock_file.read.side_effect = lambda n: bytes(('A' * n).encode())
         uut = LogFileDateSinceSeeker(self.mock_file, self.mock_constraint)
         # Expectation: find_token_reverse should give up the search and
         # status should be `failed`
@@ -319,7 +319,7 @@ class TestLogFileDateSinceSeeker(TestSearchKitBase):
         self.assertEqual(result.offset, 6907)
 
     def test_find_token_fail(self):
-        self.mock_file.read.side_effect = lambda n: ('A' * n).encode()
+        self.mock_file.read.side_effect = lambda n: bytes(('A' * n).encode())
         uut = LogFileDateSinceSeeker(self.mock_file, self.mock_constraint)
         # Expectation: there is one LF between [0,100], status should be FOUND
         # and offset should be `78`
@@ -337,7 +337,8 @@ class TestLogFileDateSinceSeeker(TestSearchKitBase):
         self.assertEqual(result.end_offset, 77)
         self.assertEqual(result.text,
                          b"2019-04-04T14:47:33.199550Z mysqld_safe"
-                         b" Logging to '/var/log/mysql/error.log'.")
+                         b" Logging to '/var/log/mysql/error.log'."[
+                             :LogLine.MAX_TEST_READ_BYTES])
         self.assertEqual(result.date, datetime(2019, 4, 4, 14, 47, 33))
 
     def test_try_find_line_elf_is_eof(self):
@@ -355,7 +356,7 @@ class TestLogFileDateSinceSeeker(TestSearchKitBase):
         self.assertEqual(result.date, datetime(2019, 4, 4, 14, 47, 33))
 
     def test_try_find_line_both_slf_elf_eof(self):
-        self.sio = StringIO("thisisaline")
+        self.bio = BytesIO(b"thisisaline")
         uut = LogFileDateSinceSeeker(self.mock_file, self.mock_constraint)
         result = uut.try_find_line(4)
         self.assertEqual(result.start_lf.status, FindTokenStatus.REACHED_EOF)
@@ -379,11 +380,12 @@ class TestLogFileDateSinceSeeker(TestSearchKitBase):
         self.assertEqual(result.text,
                          b"2019-04-04T14:47:33.243881Z mysqld_safe"
                          b" Starting mysqld daemon with databases from"
-                         b" /var/lib/percona-xtradb-cluster")
+                         b" /var/lib/percona-xtradb-cluster"[
+                             :LogLine.MAX_TEST_READ_BYTES])
         self.assertEqual(result.date, datetime(2019, 4, 4, 14, 47, 33))
 
     def test_try_find_line_elf_failed(self):
-        self.mock_file.read.side_effect = lambda n: ('A' * n).encode()
+        self.mock_file.read.side_effect = lambda n: bytes(('A' * n).encode())
         uut = LogFileDateSinceSeeker(self.mock_file, self.mock_constraint)
         with self.assertRaises(ValueError) as rexc:
             uut.try_find_line(83)
@@ -391,7 +393,8 @@ class TestLogFileDateSinceSeeker(TestSearchKitBase):
                                               " feed offset at epicenter 83")
 
     def test_try_find_line_slf_failed(self):
-        self.sio = StringIO(('A' * ((self.max_line_length * 2) - 1)) + '\n')
+        contents = ('A' * ((self.max_line_length * 2) - 1)) + '\n'
+        self.bio = BytesIO(bytes(contents.encode()))
         uut = LogFileDateSinceSeeker(self.mock_file, self.mock_constraint)
         with self.assertRaises(ValueError) as rexc:
             uut.try_find_line(self.max_line_length)
@@ -538,7 +541,7 @@ class TestLogFileDateSinceSeeker(TestSearchKitBase):
     def test_getitem_forwards(self):
         # Cut MYSQL_LOGS in such a way that there's no backwards logs
         # so the algorithm have to fallback to forwards search.
-        self.sio = StringIO(MYSQL_LOGS[5177:])
+        self.bio = BytesIO(MYSQL_LOGS[5177:])
         uut = LogFileDateSinceSeeker(self.mock_file, self.constraint)
         for offset in [1, 31, 65, 77, 87]:
             result = uut[offset]
@@ -551,7 +554,7 @@ class TestLogFileDateSinceSeeker(TestSearchKitBase):
 
     def test_getitem_backwards(self):
         # Cut MYSQL_LOGS in such a way that there's no forwards logs.
-        self.sio = StringIO(MYSQL_LOGS[5016:5282])
+        self.bio = BytesIO(MYSQL_LOGS[5016:5282])
         uut = LogFileDateSinceSeeker(self.mock_file, self.constraint)
         for offset in [192, 226]:
             result = uut[offset]
@@ -638,7 +641,7 @@ class TestLogFileDateSinceSeeker(TestSearchKitBase):
             uut.run()
 
     def test_run_no_date_found(self):
-        self.sio = StringIO("nodatewhatsoever")
+        self.bio = BytesIO(b"nodatewhatsoever")
         self.constraint = SearchConstraintSearchSince(
             current_date=self.get_date('Tue Apr 11 14:47:36 UTC 2019'),
             cache_path=self.constraints_cache_path,

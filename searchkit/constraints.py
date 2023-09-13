@@ -224,6 +224,8 @@ class LogLine(object):
     demand by calling the `text` method.
     """
 
+    MAX_TEXT_READ_BYTES = 64
+
     def __init__(self, file, constraint, line_start_lf, line_end_lf):
         assert line_start_lf
         assert line_end_lf
@@ -292,7 +294,7 @@ class LogLine(object):
         """
         with NonDestructiveFileRead(self._file) as f:
             f.seek(self.start_offset)
-            line_text = f.read(len(self))
+            line_text = f.read(min(self.MAX_TEXT_READ_BYTES, len(self)))
             return line_text
 
 
@@ -841,7 +843,7 @@ class SearchConstraintSearchSince(BinarySeekSearchBase):
     def extracted_datetime(self, line):
         if type(line) == bytes:
             # need this for e.g. gzipped files
-            line = line.decode("utf-8")
+            line = line.decode("utf-8", errors='backslashreplace')
 
         if self.ts_matcher_cls:
             timestamp = self.ts_matcher_cls(line)
