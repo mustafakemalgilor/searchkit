@@ -15,8 +15,9 @@ from searchkit.constraints import (
     SearchState,
     InvalidSearchState,
     ValidFormattedDateNotFound,
+    MaxSearchableLineLengthReached,
     ValidLinesNotFound,
-    NonDestructiveFileRead,
+    SavedFilePosition,
     LogLine,
     LogFileDateSinceSeeker,
 )
@@ -207,12 +208,12 @@ class TestSearchState(TestSearchKitBase):
         self.assertEqual(uut.offset, 15)
 
 
-class TestNonDestructiveFileRead(TestSearchKitBase):
+class TestSavedFilePosition(TestSearchKitBase):
 
     def test_peek(self):
         mock_file = mock.MagicMock()
         mock_file.tell.return_value = 0xBADC0DE
-        with NonDestructiveFileRead(mock_file):
+        with SavedFilePosition(mock_file):
             pass
         mock_file.seek.assert_called_once_with(0xBADC0DE)
 
@@ -385,7 +386,7 @@ class TestLogFileDateSinceSeeker(TestSearchKitBase):
     def test_try_find_line_elf_failed(self):
         self.mock_file.read.side_effect = lambda n: bytes(('A' * n).encode())
         uut = LogFileDateSinceSeeker(self.mock_file, self.mock_constraint)
-        with self.assertRaises(ValueError) as rexc:
+        with self.assertRaises(MaxSearchableLineLengthReached) as rexc:
             uut.try_find_line(83)
         self.assertEqual(str(rexc.exception), "Could not find ending line"
                                               " feed offset at epicenter 83")
@@ -394,7 +395,7 @@ class TestLogFileDateSinceSeeker(TestSearchKitBase):
         contents = ('A' * ((self.max_line_length * 2) - 1)) + '\n'
         self.bio = BytesIO(bytes(contents.encode()))
         uut = LogFileDateSinceSeeker(self.mock_file, self.mock_constraint)
-        with self.assertRaises(ValueError) as rexc:
+        with self.assertRaises(MaxSearchableLineLengthReached) as rexc:
             uut.try_find_line(self.max_line_length)
         self.assertEqual(str(rexc.exception), "Could not find start line feed "
                                               "offset at epicenter 1048576")
@@ -588,7 +589,7 @@ class TestLogFileDateSinceSeeker(TestSearchKitBase):
             ts_matcher_cls=TimestampSimple, days=7)
         uut = LogFileDateSinceSeeker(self.mock_file, self.constraint)
         result = uut.run()
-        self.assertEqual(result, (0, 77))
+        self.assertEqual(result, 0)
 
     def test_run_2(self):
         self.constraint = SearchConstraintSearchSince(
@@ -597,7 +598,7 @@ class TestLogFileDateSinceSeeker(TestSearchKitBase):
             ts_matcher_cls=TimestampSimple, days=7)
         uut = LogFileDateSinceSeeker(self.mock_file, self.constraint)
         result = uut.run()
-        self.assertEqual(result, (4653, 4787))
+        self.assertEqual(result, 4653)
 
     def test_run_3(self):
         self.constraint = SearchConstraintSearchSince(
@@ -606,7 +607,7 @@ class TestLogFileDateSinceSeeker(TestSearchKitBase):
             ts_matcher_cls=TimestampSimple, days=7)
         uut = LogFileDateSinceSeeker(self.mock_file, self.constraint)
         result = uut.run()
-        self.assertEqual(result, (4919, 5014))
+        self.assertEqual(result, 4919)
 
     def test_run_4(self):
         self.constraint = SearchConstraintSearchSince(
@@ -615,7 +616,7 @@ class TestLogFileDateSinceSeeker(TestSearchKitBase):
             ts_matcher_cls=TimestampSimple, days=7)
         uut = LogFileDateSinceSeeker(self.mock_file, self.constraint)
         result = uut.run()
-        self.assertEqual(result, (4919, 5014))
+        self.assertEqual(result, 4919)
 
     def test_run_before(self):
         self.constraint = SearchConstraintSearchSince(
@@ -624,7 +625,7 @@ class TestLogFileDateSinceSeeker(TestSearchKitBase):
             ts_matcher_cls=TimestampSimple, days=7)
         uut = LogFileDateSinceSeeker(self.mock_file, self.constraint)
         result = uut.run()
-        self.assertEqual(result, (0, 77))
+        self.assertEqual(result, 0)
 
     def test_run_no_such_date(self):
         self.constraint = SearchConstraintSearchSince(

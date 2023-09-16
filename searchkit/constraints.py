@@ -163,10 +163,16 @@ class ValidFormattedDateNotFound(Exception):
     date suitable to specified date format"""
 
 
-class DateNotFoundInLine(Exception):
+class LineWithDateNotFound(Exception):
     """Raised when searcher has encountered a line with no date
     and performed forward-backward searches, but still yet, could
     not found a line with date."""
+
+
+class MaxSearchableLineLengthReached(Exception):
+    """ Raises when we exceed the number of characters we can search in a line
+    before finding a line feed.
+    """
 
 
 class InvalidSearchState(Exception):
@@ -203,7 +209,7 @@ class SearchState(object):
         return self._offset
 
 
-class NonDestructiveFileRead(object):
+class SavedFilePosition(object):
     """ Context manager class that saves current position at start and restores
         once finished. """
     def __init__(self, file):
@@ -297,7 +303,7 @@ class LogLine(object):
 
         @return: the line text string
         """
-        with NonDestructiveFileRead(self._file) as f:
+        with SavedFilePosition(self._file) as f:
             f.seek(self.start_offset)
             line_text = f.read(max_len)
             return line_text
@@ -356,6 +362,7 @@ class LogFileDateSinceSeeker(object):
     # with no date.
     MAX_TRY_FIND_WITH_DATE_ATTEMPTS = 500
 
+    MAX_SEARCHABLE_LINE_LENGTH = MAX_SEEK_HORIZON_EXPAND * SEEK_HORIZON
     LINE_FEED_TOKEN = b'\n'
 
     def __init__(self, fd, c):
@@ -363,8 +370,8 @@ class LogFileDateSinceSeeker(object):
         self.constraint = c
         self.line_info = None
         self.found_any_date = False
-        self.lookup_times = 0
-        with NonDestructiveFileRead(self.file) as f:
+        self.lookup_count = 0
+        with SavedFilePosition(self.file) as f:
             self.length = f.seek(0, 2)
 
     def find_token_reverse(self, start_offset):
@@ -407,7 +414,9 @@ class LogFileDateSinceSeeker(object):
             if (start_offset + current_offset) < 0:
                 return SearchState(status=FindTokenStatus.REACHED_EOF,
                                    offset=0)
-        log.debug("reached max line length search without finding a line feed")
+
+        log.debug("reached max line length (%s) search without finding a line "
+                  "feed", self.MAX_SEARCHABLE_LINE_LENGTH)
         return SearchState(FindTokenStatus.FAILED)
 
     def find_token(self, start_offset):
@@ -446,8 +455,10 @@ class LogFileDateSinceSeeker(object):
             # chunk's length.
             current_offset = current_offset + len(chunk)
             attempts -= 1
+
         # Exhausted all the attempts and found nothing.
-        log.debug("reached max line length search without finding a line feed")
+        log.debug("reached max line length (%s) search without finding a line "
+                  "feed", self.MAX_SEARCHABLE_LINE_LENGTH)
         return SearchState(FindTokenStatus.FAILED)
 
     def try_find_line(self, epicenter, slf_off=None, elf_off=None):
@@ -516,37 +527,36 @@ class LogFileDateSinceSeeker(object):
                         to None.
         @param elf_off: Optional ending line feed offset, if known. Defaults to
                         None.
-
-        @raise ValueError: when ending line feed offset could not be found or
-                           when starting line feed offset could not be found.
-
+        @raise MaxSearchableLineLengthReached
         @return: found logline
         """
-        log.debug("    > EPICENTER: %d", epicenter)
+        log.debug("searching either side of pos=%d", epicenter)
 
         # Find the first LF token from the right of the epicenter
         # e.g. \nThis is a line\n
         #         ^epicenter    ^line end lf
-        line_end_lf = self.find_token(
-            epicenter
-        ) if elf_off is None else SearchState(
-            FindTokenStatus.FOUND, elf_off)
+        if elf_off is None:
+            line_end_lf = self.find_token(epicenter)
+        else:
+            line_end_lf = SearchState(FindTokenStatus.FOUND, elf_off)
 
         if line_end_lf.status == FindTokenStatus.FAILED:
-            raise ValueError("Could not find ending line feed "
-                             f"offset at epicenter {epicenter}")
+            raise MaxSearchableLineLengthReached("Could not find ending line "
+                                                 "feed offset at epicenter "
+                                                 f"{epicenter}")
 
         # Find the first LF token from the left of the epicenter
         # e.g.          \nThis is a line\n
         # line start lf  ^ ^epicenter
-        line_start_lf = self.find_token_reverse(
-            epicenter
-        ) if slf_off is None else SearchState(
-            FindTokenStatus.FOUND, slf_off)
+        if slf_off is None:
+            line_start_lf = self.find_token_reverse(epicenter)
+        else:
+            line_start_lf = SearchState(FindTokenStatus.FOUND, slf_off)
 
         if line_start_lf.status == FindTokenStatus.FAILED:
-            raise ValueError("Could not find start line feed "
-                             f"offset at epicenter {epicenter}")
+            raise MaxSearchableLineLengthReached("Could not find start line "
+                                                 "feed offset at epicenter "
+                                                 f"{epicenter}")
 
         # Ensure that found offsets are in file range
         assert line_start_lf.offset <= len(self)
@@ -580,6 +590,13 @@ class LogFileDateSinceSeeker(object):
 
         @return: line if found otherwise None.
         """
+        if line_feed_offset is None:
+            direction = 'reverse'
+        else:
+            direction = 'forward'
+
+        log.debug("starting %s search", direction)
+
         attempts = LogFileDateSinceSeeker.MAX_TRY_FIND_WITH_DATE_ATTEMPTS
         offset = start_offset
         log_line = None
@@ -590,18 +607,14 @@ class LogFileDateSinceSeeker(object):
                 (None, line_feed_offset)[not forwards]
             )
 
-            log.debug(
-                "    > TRY_FETCH, REMAINING_ATTEMPTS:%d, START_LF_OFFSET: %d, "
-                "END_LF_OFFSET: %d >: on line -> %s",
-                attempts,
-                log_line.start_lf.offset,
-                log_line.end_lf.offset,
-                log_line.text,
-            )
-
             # If the line has a valid date, return it.
             if log_line.date:
+                log.debug("finished %s search - date found", direction)
                 return log_line
+
+            log.debug("looking further for date: attempts_remaining=%d, "
+                      "start=%d, end=%d", attempts, log_line.start_lf.offset,
+                      log_line.end_lf.offset)
 
             # Set offset of the found line feed
             line_feed_offset = (log_line.start_lf,
@@ -609,10 +622,12 @@ class LogFileDateSinceSeeker(object):
             # Set the next search starting point
             offset = line_feed_offset + (-1, +1)[forwards]
             if offset < 0 or offset > len(self):
-                log.debug("    > TRY_FETCH EXIT EOF/SOF")
+                log.debug("search hit eof/sof - exiting")
                 break
 
             attempts -= 1
+
+        log.debug("finished %s search - no date found", direction)
         return None
 
     def __len__(self):
@@ -699,40 +714,27 @@ class LogFileDateSinceSeeker(object):
         the comparison.
 
         @param offset: integer lookup offset
-        @raise DateNotFoundInLine: When a line with a date could not
+        @raise LineWithDateNotFound: When a line with a date could not
                                    be found.
         @return: Date of the line at `offset`
         """
 
-        self.lookup_times += 1
-        log.debug("-------------------------------------------")
-        log.debug("-------------------------------------------")
-        log.debug("-------------------------------------------")
-        log.debug("-------------------------------------------")
-        log.debug("LOOKUP (#%d) AT OFFSET: %d", self.lookup_times, offset)
+        self.lookup_count += 1
+        log.debug("timestamp lookup attempt=%d, offset=%d", self.lookup_count,
+                  offset)
         result = None
 
         # Try to search backwards first.
         # First call will effectively be a regular forward search given
         # that we're not passing a line feed offset to the function.
         # Any subsequent search attempt will be made backwards.
-        log.debug("######### BACKWARDS SEARCH START #########")
-        result = self.try_find_line_with_date(
-            offset,
-            None,
-            False,
-        )
-        log.debug("######### BACKWARDS SEARCH END #########")
-
+        result = self.try_find_line_with_date(offset, None, False)
         # ... then, forwards.
         if not result or result.date is None:
-            log.debug("######### FORWARDS SEARCH START #########")
             result = self.try_find_line_with_date(offset + 1, offset, True)
 
-            log.debug("######### FORWARDS SEARCH END #########")
-
         if not result or result.date is None:
-            raise DateNotFoundInLine(
+            raise LineWithDateNotFound(
                 f"Date search failed at offset `{offset}`")
 
         # This is mostly for diagnostics. If we could not find
@@ -746,24 +748,45 @@ class LogFileDateSinceSeeker(object):
             # lookup.
             self.line_info = result
 
-        log.debug(
-            "    > EXTRACTED_DATE: `%s` >= SINCE DATE: `%s` == %s",
-            result.date,
-            self.constraint._since_date,
-            (result.date >= self.constraint._since_date)
-            if result.date else False,
-        )
+        constraint_met = ((result.date >= self.constraint._since_date)
+                          if result.date else False)
+        log.debug("extracted_date='%s' >= since_date='%s' == %s", result.date,
+                  self.constraint._since_date, constraint_met)
         return result.date
 
     def run(self):
-        # bisect_left will give us the first occurenct of the date
-        # that satisfies the constraint.
-        # Similarly, bisect_right would allow the last occurence of
-        # a date that satisfies the criteria.
+        """
+        Bisect_left will give us the first occurrence of the date
+        that satisfies the constraint. Similarly, bisect_right would allow the
+        last occurrence of a date that satisfies the criteria.
+        """
+
+        # Check last line in file first, if not valid we know rest is also not
+        # valid.
+        log.debug("checking last line")
+        with SavedFilePosition(self.file):
+            result = self.try_find_line_with_date(self.file.seek(0, 2), None,
+                                                  False)
+            log.debug("last line has date that is not valid")
+            if result and result.date is None:
+                raise ValidFormattedDateNotFound()
+
+        # Check first line in file, if valid we know rest of file is valid
+        log.debug("checking first line")
+        with SavedFilePosition(self.file):
+            current = self.file.tell()
+            # NOTE: the end lf offset 100 below is arbitrary
+            result = LogLine(self.file, self.constraint,
+                             SearchState(FindTokenStatus.FOUND, -1),
+                             SearchState(FindTokenStatus.FOUND, 100))
+            if result.date is not None:
+                if result.date >= self.constraint._since_date:
+                    log.debug("first line has date that is valid")
+                    return current
 
         try:
             bisect.bisect_left(self, self.constraint._since_date)
-        except DateNotFoundInLine as exc:
+        except LineWithDateNotFound as exc:
             if not self.found_any_date:
                 raise ValidFormattedDateNotFound from exc
 
@@ -772,16 +795,12 @@ class LogFileDateSinceSeeker(object):
         if not self.line_info:
             raise ValidLinesNotFound
 
-        log.debug(
-            "RUN END, FOUND LINE(START:%d, END:%d, CONTENT:%s)"
-            " IN %d LOOKUP(S)",
-            self.line_info.start_offset,
-            self.line_info.end_offset,
-            self.line_info.text,
-            self.lookup_times
-        )
+        log.debug("run end: found line start=%d, end=%d, content=%s in %d "
+                  "lookup(s)", self.line_info.start_offset,
+                  self.line_info.end_offset, self.line_info.text,
+                  self.lookup_count)
 
-        return (self.line_info.start_offset, self.line_info.end_offset)
+        return self.line_info.start_offset
 
 
 class SearchConstraintSearchSince(BinarySeekSearchBase):
@@ -909,20 +928,24 @@ class SearchConstraintSearchSince(BinarySeekSearchBase):
             return
 
         if fd.name in self._results:
-            log.debug("ret cached")
+            log.debug("using cached offset")
             return self._results[fd.name]
 
         log.debug("c:%s: starting binary seek search to %s in file %s "
                   "(destructive=True)", self.id, self._since_date, fd.name)
         try:
+            orig_offset = fd.tell()
             seeker = LogFileDateSinceSeeker(fd, self)
-            result = seeker.run()
-            fd.seek(result[0] if result and destructive else 0)
+            new_offset = seeker.run()
+            if new_offset is None or not destructive:
+                fd.seek(orig_offset)
+            else:
+                fd.seek(new_offset)
 
-            if not result or result[0] == len(seeker):
+            if new_offset is None or new_offset == len(seeker):
                 self._results[fd.name] = None
             else:
-                self._results[fd.name] = result[0]
+                self._results[fd.name] = new_offset
         except ValidFormattedDateNotFound:
             log.debug("c:%s No timestamp found in file", self.id)
             fd.seek(0)
@@ -931,11 +954,15 @@ class SearchConstraintSearchSince(BinarySeekSearchBase):
             log.debug("c:%s No date after found in file", self.id)
             fd.seek(0, 2)
             return fd.tell()
-        except DateNotFoundInLine as ed:
-            log.debug("c:%s Expanded date search failed for a line: %s",
-                      self.id, ed)
+        except LineWithDateNotFound as exc:
+            log.warning("c:%s failed to find a line containing a date: %s",
+                        self.id, exc)
             fd.seek(0)
             return fd.tell()
+        except MaxSearchableLineLengthReached as exc:
+            log.error("c:%s exceeded allowed line length search limit "
+                      "before finding line feed: %s", self.id, exc)
+            raise
 
         log.debug("c:%s: finished binary seek search in file %s, offset %d",
                   self.id, fd.name, self._results[fd.name])
@@ -947,5 +974,4 @@ class SearchConstraintSearchSince(BinarySeekSearchBase):
         return _stats
 
     def __repr__(self):
-        return ("id={}, since={}, current={}".
-                format(self.id, self._since_date, self.current_date))
+        return "id={}, since={}".format(self.id, self._since_date)
